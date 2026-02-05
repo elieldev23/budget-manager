@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
 
 import FiltersBarClient from "@/app/_components/FiltersBar.client";
-import TransactionsTable from "@/app/_components/TransactionsTable";
+import TransactionsTable, { type TxUI } from "@/app/_components/TransactionsTable";
 import TableControlsClient from "@/app/_components/TableControls.client";
 import PaginationClient from "@/app/_components/Pagination.client";
 
@@ -75,7 +75,7 @@ export default async function DashboardPage({
 
   const [
     total,
-    transactions,
+    txRaw,
     summary,
     income,
     expenses,
@@ -127,12 +127,26 @@ export default async function DashboardPage({
     }),
   ]);
 
-  // ✅ normalisation (name toujours string)
+  // Normalisation (name toujours string)
   const sources = uniqueByName(sourcesRaw);
   const categories = uniqueByName(categoriesRaw);
   const users = uniqueByName(
     usersRaw.map((u) => ({ id: u.id, name: u.name ?? u.email }))
   );
+
+  // ✅ IMPORTANT: Prisma -> TxUI (date string + noms résolus)
+  const transactions: TxUI[] = txRaw.map((t) => ({
+    id: t.id,
+    date: t.date.toISOString().slice(0, 10), // YYYY-MM-DD
+    note: t.note,
+    amountCents: t.amountCents,
+    userId: t.userId,
+    sourceLabelId: t.sourceLabelId ?? null,
+    categoryLabelId: t.categoryLabelId ?? null,
+    userName: t.user?.name ?? t.user?.email ?? null,
+    sourceName: t.source?.name ?? null,
+    categoryName: t.category?.name ?? null,
+  }));
 
   return (
     <div className="p-6 space-y-6">

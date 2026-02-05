@@ -1,15 +1,26 @@
 "use client";
 
-import type { Prisma } from "@prisma/client";
-import { useState } from "react";
-import InlineEditRow from "@/app/_components/InlineEditRow.client";
+import { useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import TxRowActions from "@/app/_components/TxRowActions.client";
-
-type Tx = Prisma.TransactionGetPayload<{
-  include: { user: true; source: true; category: true };
-}>;
+import InlineEditRow from "@/app/_components/InlineEditRow.client";
 
 type Named = { id: string; name: string };
+
+export type TxUI = {
+  id: string;
+  date: string; // YYYY-MM-DD
+  note: string | null;
+  amountCents: number;
+  userId: string;
+  sourceLabelId: string | null;
+  categoryLabelId: string | null;
+
+  // affichage (déjà résolu côté server)
+  userName?: string | null;
+  sourceName?: string | null;
+  categoryName?: string | null;
+};
 
 function formatCAD(cents: number) {
   return new Intl.NumberFormat("fr-CA", {
@@ -18,13 +29,17 @@ function formatCAD(cents: number) {
   }).format(cents / 100);
 }
 
-function formatDate(d: Date) {
+function formatDate(yyyyMmDd: string) {
+  const [y, m, d] = yyyyMmDd.split("-").map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
   return new Intl.DateTimeFormat("fr-CA", {
+    timeZone: "UTC",
     year: "numeric",
     month: "short",
     day: "2-digit",
-  }).format(d);
+  }).format(dt);
 }
+
 
 export default function TransactionsTable({
   transactions,
@@ -32,14 +47,84 @@ export default function TransactionsTable({
   sources,
   categories,
 }: {
-  transactions: Tx[];
+  transactions: TxUI[];
   users: Named[];
   sources: Named[];
   categories: Named[];
 }) {
+  const [rows, setRows] = useState<TxUI[]>(transactions);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const snapshotRef = useRef<TxUI[] | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
 
-  if (transactions.length === 0) {
+  const byId = useMemo(() => {
+    const u = new Map(users.map((x) => [x.id, x.name]));
+    const s = new Map(sources.map((x) => [x.id, x.name]));
+    const c = new Map(categories.map((x) => [x.id, x.name]));
+    return { u, s, c };
+  }, [users, sources, categories]);
+
+  function optimisticApply(next: {
+    id: string;
+    date: string;
+    note: string | null;
+    amountCents: number;
+    userId: string;
+    sourceLabelId: string | null;
+    categoryLabelId: string | null;
+  }) {
+    snapshotRef.current = rows;
+
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.id !== next.id) return r;
+
+        return {
+          ...r,
+          ...next,
+          userName: byId.u.get(next.userId) ?? r.userName ?? null,
+          sourceName: next.sourceLabelId
+            ? byId.s.get(next.sourceLabelId) ?? null
+            : null,
+          categoryName: next.categoryLabelId
+            ? byId.c.get(next.categoryLabelId) ?? null
+            : null,
+        };
+      })
+    );
+  }
+
+  function optimisticRollback() {
+    if (snapshotRef.current) setRows(snapshotRef.current);
+    snapshotRef.current = null;
+  }
+
+  async function deleteTx(id: string) {
+    setBusyId(id);
+
+    // optimistic remove
+    snapshotRef.current = rows;
+    setRows((prev) => prev.filter((r) => r.id !== id));
+
+    try {
+      const res = await fetch(`/api/transactions/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || "Erreur delete");
+      }
+      toast.success("Transaction supprimée ✅");
+      if (editingId === id) setEditingId(null);
+    } catch (e: any) {
+      optimisticRollback();
+      toast.error("Erreur suppression", {
+        description: e?.message ?? "Impossible de supprimer.",
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  if (rows.length === 0) {
     return (
       <div className="rounded border border-white/10 bg-white/5 p-6">
         <p className="text-sm text-white/70">Aucune transaction pour l’instant.</p>
@@ -51,7 +136,7 @@ export default function TransactionsTable({
     <div className="rounded border border-white/10 bg-white/5 overflow-hidden">
       <div className="px-4 py-3 border-b border-white/10">
         <h2 className="text-base font-semibold">Transactions</h2>
-        <p className="text-xs text-white/60">{transactions.length} sur cette page</p>
+        <p className="text-xs text-white/60">{rows.length} sur cette page</p>
       </div>
 
       <div className="overflow-x-auto">
@@ -69,7 +154,7 @@ export default function TransactionsTable({
           </thead>
 
           <tbody className="text-white/90">
-            {transactions.map((t) => {
+            {rows.map((t) => {
               if (editingId === t.id) {
                 return (
                   <InlineEditRow
@@ -77,19 +162,18 @@ export default function TransactionsTable({
                     tx={{
                       id: t.id,
                       date: t.date,
-                      note: t.note ?? null,
+                      note: t.note,
                       amountCents: t.amountCents,
                       userId: t.userId,
-                      sourceLabelId: t.sourceLabelId ?? null,
-                      categoryLabelId: t.categoryLabelId ?? null,
-                      user: t.user,
-                      source: t.source,
-                      category: t.category,
+                      sourceLabelId: t.sourceLabelId,
+                      categoryLabelId: t.categoryLabelId,
                     }}
                     users={users}
                     sources={sources}
                     categories={categories}
                     onDone={() => setEditingId(null)}
+                    onOptimisticApply={optimisticApply}
+                    onOptimisticRollback={optimisticRollback}
                   />
                 );
               }
@@ -105,15 +189,15 @@ export default function TransactionsTable({
                   </td>
 
                   <td className="px-4 py-3 whitespace-nowrap">
-                    {t.source?.name ?? <span className="text-white/50">—</span>}
+                    {t.sourceName ?? <span className="text-white/50">—</span>}
                   </td>
 
                   <td className="px-4 py-3 whitespace-nowrap">
-                    {t.category?.name ?? <span className="text-white/50">—</span>}
+                    {t.categoryName ?? <span className="text-white/50">—</span>}
                   </td>
 
                   <td className="px-4 py-3 whitespace-nowrap">
-                    {t.user?.name ?? <span className="text-white/50">—</span>}
+                    {t.userName ?? <span className="text-white/50">—</span>}
                   </td>
 
                   <td
@@ -126,17 +210,11 @@ export default function TransactionsTable({
                   </td>
 
                   <td className="px-4 py-3 whitespace-nowrap text-right">
-                    <div className="inline-flex items-center gap-2">
-                      <button
-                        onClick={() => setEditingId(t.id)}
-                        className="px-3 py-1 rounded border border-white/15 text-sm hover:bg-white/10"
-                      >
-                        Modifier
-                      </button>
-
-                      {/* ton menu delete existant */}
-                      <TxRowActions id={t.id} />
-                    </div>
+                    <TxRowActions
+                      disabled={busyId === t.id}
+                      onEdit={() => setEditingId(t.id)}
+                      onDelete={() => deleteTx(t.id)}
+                    />
                   </td>
                 </tr>
               );
