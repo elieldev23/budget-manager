@@ -1,68 +1,55 @@
+import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db/prisma";
 
-export async function PATCH(
-  req: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-    const body = await req.json();
+type Params = { params: Promise<{ id: string }> };
 
-    const dateStr = String(body.date ?? "");
-    const amountCents = Number(body.amountCents);
+export async function PATCH(req: Request, { params }: Params) {
+  const { id } = await params;
 
-    const note = body.note === null ? null : String(body.note ?? "");
-    const sourceLabelId = body.sourceLabelId ? String(body.sourceLabelId) : null;
-    const categoryLabelId = body.categoryLabelId ? String(body.categoryLabelId) : null;
-    const userId = body.userId ? String(body.userId) : null;
+  const body = await req.json().catch(() => ({}));
 
-    if (!dateStr) {
-      return Response.json({ error: "date est obligatoire." }, { status: 400 });
-    }
-    if (!Number.isFinite(amountCents) || amountCents === 0) {
-      return Response.json(
-        { error: "amountCents invalide (ne peut pas être 0)." },
-        { status: 400 }
-      );
-    }
+  // On accepte des updates partiels
+  const data: any = {};
 
-    const date = new Date(dateStr);
-    if (Number.isNaN(date.getTime())) {
-      return Response.json({ error: "Date invalide." }, { status: 400 });
-    }
+  if (typeof body.note === "string") data.note = body.note.trim() || null;
 
-    const updated = await prisma.transaction.update({
-      where: { id },
-      data: {
-        date,
-        amountCents: Math.trunc(amountCents),
-        note: note || null,
-        sourceLabelId,
-        categoryLabelId,
-        ...(userId ? { userId } : {}),
-      },
-    });
-
-    return Response.json({ ok: true, transaction: updated }, { status: 200 });
-  } catch {
-    return Response.json({ error: "Erreur serveur." }, { status: 500 });
+  if (typeof body.amountCents === "number" && Number.isFinite(body.amountCents)) {
+    data.amountCents = Math.trunc(body.amountCents);
   }
+
+  if (typeof body.date === "string") {
+    const d = new Date(body.date);
+    if (!Number.isNaN(d.getTime())) data.date = d;
+  }
+
+  if (typeof body.sourceLabelId === "string") {
+    data.sourceLabelId = body.sourceLabelId || null;
+  }
+
+  if (typeof body.categoryLabelId === "string") {
+    data.categoryLabelId = body.categoryLabelId || null;
+  }
+
+  if (typeof body.userId === "string") {
+    data.userId = body.userId;
+  }
+
+  // Sécurité: rien à update
+  if (Object.keys(data).length === 0) {
+    return NextResponse.json({ ok: true, id }, { status: 200 });
+  }
+
+  const updated = await prisma.transaction.update({
+    where: { id },
+    data,
+    include: { user: true, source: true, category: true },
+  });
+
+  return NextResponse.json(updated, { status: 200 });
 }
 
-export async function DELETE(
-  _req: Request,
-  { params }: { params: Promise<{ id: string }> }
-) {
-  try {
-    const { id } = await params;
-
-    // delete retourne l'objet supprimé => parfait pour undo
-    const deleted = await prisma.transaction.delete({
-      where: { id },
-    });
-
-    return Response.json({ ok: true, deleted }, { status: 200 });
-  } catch {
-    return Response.json({ error: "Erreur serveur." }, { status: 500 });
-  }
+export async function DELETE(_req: Request, { params }: Params) {
+  const { id } = await params;
+  await prisma.transaction.delete({ where: { id } });
+  return NextResponse.json({ ok: true }, { status: 200 });
 }

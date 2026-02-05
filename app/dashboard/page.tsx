@@ -1,7 +1,11 @@
 import Link from "next/link";
+import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/db/prisma";
+
 import FiltersBarClient from "@/app/_components/FiltersBar.client";
 import TransactionsTable from "@/app/_components/TransactionsTable";
+import TableControlsClient from "@/app/_components/TableControls.client";
+import PaginationClient from "@/app/_components/Pagination.client";
 
 function formatCAD(cents: number) {
   return new Intl.NumberFormat("fr-CA", {
@@ -11,11 +15,19 @@ function formatCAD(cents: number) {
 }
 
 function startOfMonth(year: number, month1to12: number) {
-  return new Date(Date.UTC(year, month1to12 - 1, 1, 0, 0, 0));
+  return new Date(Date.UTC(year, month1to12 - 1, 1));
 }
 
 function startOfNextMonth(year: number, month1to12: number) {
-  return new Date(Date.UTC(year, month1to12, 1, 0, 0, 0));
+  return new Date(Date.UTC(year, month1to12, 1));
+}
+
+type Named = { id: string; name: string };
+
+function uniqueByName(items: Named[]) {
+  const map = new Map<string, Named>();
+  for (const it of items) if (!map.has(it.name)) map.set(it.name, it);
+  return Array.from(map.values());
 }
 
 export default async function DashboardPage({
@@ -24,23 +36,17 @@ export default async function DashboardPage({
   searchParams: Promise<Record<string, string | string[] | undefined>>;
 }) {
   const workspaceId = "car-workspace";
-
   const sp = await searchParams;
 
-  const yearStr = typeof sp.year === "string" ? sp.year : "2026";
-  const monthStr = typeof sp.month === "string" ? sp.month : ""; // "" => all months
+  // Filters
+  const year = Number(sp.year ?? 2026);
+  const month = Number(sp.month ?? "");
   const sourceId = typeof sp.source === "string" ? sp.source : "";
   const categoryId = typeof sp.category === "string" ? sp.category : "";
 
-  const year = Number(yearStr) || 2026;
-  const month = monthStr ? Number(monthStr) : NaN;
-
   const dateFilter =
-    monthStr && !Number.isNaN(month) && month >= 1 && month <= 12
-      ? {
-          gte: startOfMonth(year, month),
-          lt: startOfNextMonth(year, month),
-        }
+    month >= 1 && month <= 12
+      ? { gte: startOfMonth(year, month), lt: startOfNextMonth(year, month) }
       : undefined;
 
   const where = {
@@ -50,52 +56,88 @@ export default async function DashboardPage({
     ...(categoryId ? { categoryLabelId: categoryId } : {}),
   } as const;
 
-  const [transactions, summary, income, expenses, sources, categories] =
-    await Promise.all([
-      prisma.transaction.findMany({
-        where,
-        orderBy: { date: "desc" },
-        include: { source: true, category: true, user: true },
-      }),
+  // Sorting
+  const sortParam = typeof sp.sort === "string" ? sp.sort : "date";
+  const orderParam = typeof sp.order === "string" ? sp.order : "desc";
+  const dir: Prisma.SortOrder = orderParam === "asc" ? "asc" : "desc";
 
-      prisma.transaction.aggregate({
-        where,
-        _sum: { amountCents: true },
-        _count: { _all: true },
-      }),
+  const orderBy: Prisma.TransactionOrderByWithRelationInput =
+    sortParam === "amount"
+      ? { amountCents: dir }
+      : sortParam === "note"
+      ? { note: dir }
+      : { date: dir };
 
-      prisma.transaction.aggregate({
-        where: { ...where, amountCents: { gt: 0 } },
-        _sum: { amountCents: true },
-      }),
+  // Pagination
+  const pageSize = 10;
+  const page = Math.max(1, Number(sp.page ?? 1));
+  const skip = (page - 1) * pageSize;
 
-      prisma.transaction.aggregate({
-        where: { ...where, amountCents: { lt: 0 } },
-        _sum: { amountCents: true },
-      }),
+  const [
+    total,
+    transactions,
+    summary,
+    income,
+    expenses,
+    sourcesRaw,
+    categoriesRaw,
+    usersRaw,
+  ] = await Promise.all([
+    prisma.transaction.count({ where }),
 
-      prisma.label.findMany({
-        where: { workspaceId, kind: "source" },
-        orderBy: { name: "asc" },
-        select: { id: true, name: true },
-      }),
+    prisma.transaction.findMany({
+      where,
+      orderBy,
+      skip,
+      take: pageSize,
+      include: { source: true, category: true, user: true },
+    }),
 
-      prisma.label.findMany({
-        where: { workspaceId, kind: "category" },
-        orderBy: { name: "asc" },
-        select: { id: true, name: true },
-      }),
-    ]);
+    prisma.transaction.aggregate({
+      where,
+      _sum: { amountCents: true },
+      _count: { _all: true },
+    }),
 
-  const totalCents = summary._sum.amountCents ?? 0;
-  const incomeCents = income._sum.amountCents ?? 0;
-  const expenseCents = expenses._sum.amountCents ?? 0;
+    prisma.transaction.aggregate({
+      where: { ...where, amountCents: { gt: 0 } },
+      _sum: { amountCents: true },
+    }),
+
+    prisma.transaction.aggregate({
+      where: { ...where, amountCents: { lt: 0 } },
+      _sum: { amountCents: true },
+    }),
+
+    prisma.label.findMany({
+      where: { workspaceId, kind: "source" },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+
+    prisma.label.findMany({
+      where: { workspaceId, kind: "category" },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
+    }),
+
+    prisma.user.findMany({
+      orderBy: { name: "asc" },
+      select: { id: true, name: true, email: true },
+    }),
+  ]);
+
+  // ✅ normalisation (name toujours string)
+  const sources = uniqueByName(sourcesRaw);
+  const categories = uniqueByName(categoriesRaw);
+  const users = uniqueByName(
+    usersRaw.map((u) => ({ id: u.id, name: u.name ?? u.email }))
+  );
 
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-
         <Link
           href="/dashboard/new"
           className="px-4 py-2 rounded bg-white text-black font-semibold"
@@ -106,6 +148,8 @@ export default async function DashboardPage({
 
       <FiltersBarClient sources={sources} categories={categories} />
 
+      <TableControlsClient />
+
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="p-4 rounded bg-white/5 border border-white/10">
           <p className="text-sm text-white/60">Transactions</p>
@@ -114,21 +158,34 @@ export default async function DashboardPage({
 
         <div className="p-4 rounded bg-white/5 border border-white/10">
           <p className="text-sm text-white/60">Revenus</p>
-          <p className="text-2xl font-semibold">{formatCAD(incomeCents)}</p>
+          <p className="text-2xl font-semibold">
+            {formatCAD(income._sum.amountCents ?? 0)}
+          </p>
         </div>
 
         <div className="p-4 rounded bg-white/5 border border-white/10">
           <p className="text-sm text-white/60">Dépenses</p>
-          <p className="text-2xl font-semibold">{formatCAD(expenseCents)}</p>
+          <p className="text-2xl font-semibold">
+            {formatCAD(expenses._sum.amountCents ?? 0)}
+          </p>
         </div>
 
         <div className="p-4 rounded bg-white/5 border border-white/10">
           <p className="text-sm text-white/60">Solde</p>
-          <p className="text-2xl font-semibold">{formatCAD(totalCents)}</p>
+          <p className="text-2xl font-semibold">
+            {formatCAD(summary._sum.amountCents ?? 0)}
+          </p>
         </div>
       </div>
 
-      <TransactionsTable transactions={transactions} />
+      <TransactionsTable
+        transactions={transactions}
+        users={users}
+        sources={sources}
+        categories={categories}
+      />
+
+      <PaginationClient page={page} pageSize={pageSize} total={total} />
     </div>
   );
 }
